@@ -1,0 +1,92 @@
+module kernels
+  use, intrinsic :: iso_fortran_env, i32=>int32, i8=>int8
+  use cudafor
+  implicit none
+  private
+  public :: solve
+contains
+  attributes(global) subroutine kernel1(mask)
+    logical(i8), device, intent(out) :: mask(:)
+
+    integer(i32) :: i
+    integer(i32) :: tid
+    integer(i32) :: nth
+
+    tid = (blockIdx%x-1) * blockDim%x + threadIdx%x
+    nth = blockDim%x * gridDim%x
+
+    do i = tid, size(mask,1), nth
+      mask(i) = (mod(i, 3) == 0 .or. mod(i, 5) == 0)
+    end do
+
+  end subroutine kernel1
+
+  attributes(global) subroutine kernel2(mask,rslt)
+    logical(i8),  device, intent(in)  :: mask(:)
+    integer(i32), device, intent(out) :: rslt
+
+    integer(i32), shared :: multiples(*)
+    integer(i32) :: i
+    integer(i32) :: tid
+    integer(i32) :: nth
+
+    tid = threadIdx%x
+    nth = blockDim%x
+
+    multiples(tid) = 0
+    do i=tid, size(mask,1), nth 
+      if (mask(i)) multiples(tid) = multiples(tid) + i
+    end do
+
+    i = rshift(nth,1)
+    do while (i >= 32)
+      if (tid <= i) multiples(tid) = multiples(tid) + multiples(tid + i)
+      i = rshift(i,1)
+      call syncthreads()
+    end do
+
+    multiples(tid) = multiples(tid) + __shfl_xor(multiples(tid),16)
+    multiples(tid) = multiples(tid) + __shfl_xor(multiples(tid),8)
+    multiples(tid) = multiples(tid) + __shfl_xor(multiples(tid),4)
+    multiples(tid) = multiples(tid) + __shfl_xor(multiples(tid),2)
+    multiples(tid) = multiples(tid) + __shfl_xor(multiples(tid),1)
+
+    if (tid == 1) rslt = multiples(tid)
+
+  end subroutine kernel2
+
+  function solve(n) result(rslt)
+    integer(i32), intent(in) :: n
+    integer(i32) :: rslt
+
+    logical(i8),  allocatable, device :: mask_d(:)
+    integer(i32),              device :: rslt_d
+
+    type(dim3) :: blocks
+    type(dim3) :: threads
+
+    allocate(mask_d(n))
+    mask_d = .false.
+
+    blocks = dim3((n+128)/128,1,1)
+    threads = dim3(128,1,1)
+    call kernel1<<<blocks,threads>>>(mask_d)
+
+    blocks = dim3(1,1,1)
+    threads = dim3(1024,1,1)
+    call kernel2<<<blocks,threads,1024*sizeof(1_i32)>>>(mask_d,rslt_d)
+
+    rslt = rslt_d
+
+    deallocate(mask_d)
+
+  end function solve
+
+end module kernels
+
+program ex001
+  use, intrinsic :: iso_fortran_env, i32=>int32, stdout=>output_unit
+  use kernels
+  implicit none
+  write(stdout, "(A,I6)") "ex001: ", solve(999)
+end program ex001
