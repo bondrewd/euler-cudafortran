@@ -1,0 +1,85 @@
+module kernels
+  use, intrinsic :: iso_fortran_env, i32=>int32, f64=>real64
+  use cudafor
+  implicit none
+  private
+  real(f64), parameter :: GOLDEN_RATIO = (1.0_f64 + sqrt(5.0_f64)) / 2.0_f64
+  public solve
+contains
+  attributes(device,host) pure function fibonacci(n) result(rslt)
+    integer(i32), intent(in) :: n
+    integer(i32) :: rslt
+    rslt = int(floor((GOLDEN_RATIO**n) / sqrt(5.0_f64) + 0.5_f64), kind=i32)
+  end function fibonacci
+
+  attributes(device,host) pure function fibonacci_inv(n) result(rslt)
+    integer(i32), intent(in) :: n
+    integer(i32) :: rslt
+    rslt = int(floor(log((real(n, kind=f64) + 0.5_f64) * sqrt(5.0_f64))/log(GOLDEN_RATIO)), kind=i32)
+  end function fibonacci_inv
+
+  attributes(global) subroutine kernel(idx,rslt)
+    integer(i32), value,  intent(in)  :: idx
+    integer(i32), device, intent(out) :: rslt
+
+    integer(i32), shared :: buffer(*)
+
+    integer(i32) :: i
+    integer(i32) :: fib
+    integer(i32) :: tid
+    integer(i32) :: nth
+
+    tid = threadIdx%x
+    nth = blockDim%x
+
+    buffer(tid) = 0
+    do i = tid, idx, nth
+      fib = fibonacci(i)
+      if (mod(fib,2) == 0) buffer(tid) = buffer(tid) + fibonacci(i)
+    end do
+
+    i = rshift(nth,1)
+    do while (i >= 32)
+      if (tid <= i) buffer(tid) = buffer(tid) + buffer(tid+i)
+      i = rshift(i,1)
+      call syncthreads()
+    end do
+
+    buffer(tid) = buffer(tid) + __shfl_xor(buffer(tid),16)
+    buffer(tid) = buffer(tid) + __shfl_xor(buffer(tid),8)
+    buffer(tid) = buffer(tid) + __shfl_xor(buffer(tid),4)
+    buffer(tid) = buffer(tid) + __shfl_xor(buffer(tid),2)
+    buffer(tid) = buffer(tid) + __shfl_xor(buffer(tid),1)
+
+    if (tid == 1) rslt = buffer(tid)
+
+  end subroutine kernel
+
+  function solve(n) result(rslt)
+    integer(i32), intent(in) :: n
+    integer(i32) :: rslt
+
+    integer(i32), device :: rslt_d
+    integer(i32) :: idx
+
+    type(dim3) :: blocks
+    type(dim3) :: threads
+    integer(i32) :: shrmem
+
+    idx = fibonacci_inv(n)
+
+    blocks = dim3(1,1,1)
+    threads = dim3(32,1,1)
+    shrmem = 32*sizeof(1_i32)
+    call kernel<<<blocks, threads, shrmem>>>(idx,rslt_d)
+
+    rslt = rslt_d
+  end function solve
+end module kernels
+
+program ex002
+  use, intrinsic :: iso_fortran_env, i32=>int32, stdout=>output_unit
+  use kernels
+  implicit none
+  write(stdout, "(A,I7)") "ex002: ", solve(4000000)
+end program ex002
